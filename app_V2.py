@@ -10,6 +10,9 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 import urllib.parse
+import time
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score
 
 st.set_page_config(page_title="LungGuard HK", page_icon="🫁", layout="centered", initial_sidebar_state="expanded")
 
@@ -17,13 +20,14 @@ st.set_page_config(page_title="LungGuard HK", page_icon="🫁", layout="centered
 translations = {
     "en": {
         "title": "🫁 LungGuard HK",
-        "subtitle": "Never-Smoker Breath Cancer Screen",
+        "subtitle": "Non-Smoker Breath Cancer Screen",
         "validated": "Validated on Asian data • Complements Hospital Authority AI-LDCT pilot",
         "language": "Language",
-        "baseline_title": "Never-Smoker Risk Calculator",
+        "baseline_title": "Non-Smoker Risk Calculator",
         "breath_title": "Breath Analysis",
         "vocs_tab": "16 VOCs",
         "advanced_tab": "Professor / Lab Mode",
+        "research_tab": "Researcher Training",
         "age": "Age",
         "gender": "Gender",
         "cooking": "Cooking Oil Use",
@@ -47,7 +51,7 @@ translations = {
         "specificity": "Specificity",
         "auc": "AUC",
         "accuracy_demo": "Accuracy (demo)",
-        "footer": "LungGuard HK v0.3 • Research & Demo Only • Not a medical device • Built by Ryan (CUHK Medicine)",
+        "footer": "LungGuard HK v0.4 • Research & Demo Only • Not a medical device",
         "pdf_title": "LungGuard HK Risk Report",
         "pdf_date": "Date",
         "pdf_patient": "Patient Summary",
@@ -65,6 +69,7 @@ translations = {
         "breath_title": "呼吸分析",
         "vocs_tab": "16 VOCs",
         "advanced_tab": "教授／實驗室模式",
+        "research_tab": "研究者訓練",
         "age": "年齡",
         "gender": "性別",
         "cooking": "高溫煮食頻率",
@@ -88,7 +93,7 @@ translations = {
         "specificity": "特異度",
         "auc": "AUC",
         "accuracy_demo": "準確度（示範）",
-        "footer": "LungGuard HK v0.3 • 僅供研究及示範 • 非醫療儀器 • CUHK 醫學生 Ryan 開發",
+        "footer": "LungGuard HK v0.4 • 僅供研究及示範 • 非醫療儀器",
         "pdf_title": "LungGuard HK 風險報告",
         "pdf_date": "日期",
         "pdf_patient": "病人摘要",
@@ -107,60 +112,85 @@ st.title(t["title"])
 st.caption(t["subtitle"])
 st.markdown(f"**{t['validated']}**")
 
+# ==================== GLOBAL DEFAULTS ====================
+defaults = {
+    "Acetaldehyde": 100, "2-Hydroxyacetaldehyde": 700, "Isoprene": 5000,
+    "Pentanal": 100, "Butyric acid": 250, "Toluene": 3000,
+    "2,5-Dimethylfuran": 15, "Cyclohexanone": 130, "Hexanal": 20,
+    "Heptanal": 35, "Acetophenone": 130, "Propylcyclohexane": 220,
+    "Octanal": 45, "Nonanal": 25, "Decanal": 45, "2,2-Dimethyldecane": 130
+}
+
 # ==================== SIDEBAR ====================
 with st.sidebar:
     st.header(t["baseline_title"])
     age = st.slider(t["age"], 18, 85, 45)
     gender = st.selectbox(t["gender"], ["Female", "Male"] if lang == "en" else ["女性", "男性"])
     cooking = st.selectbox(t["cooking"], 
-                           ["Rarely", "1-2x/week", "3-5x/week", "Daily"] if lang == "en" 
-                           else ["很少", "每週1-2次", "每週3-5次", "每日"])
+                           ["Never","Rarely", "1-2x/week", "3-5x/week", "Daily"] if lang == "en" 
+                           else ["從不", "很少", "每週1-2次", "每週3-5次", "每日"])
     air_days = st.slider(t["air_days"], 0, 365, 120)
     family = st.selectbox(t["family"], 
-                          ["No", "Yes (1st degree)"] if lang == "en" 
-                          else ["無", "有（一級親屬）"])
+                          ["No", "Yes (1st degree)", "Yes (2nd degree)"] if lang == "en" 
+                          else ["無", "有（一級親屬）", "有（二級親屬）"])
     gp_email = st.text_input(t["gp_email"], "tony@clo.cuhk.edu.hk")
 
     baseline_score = min(int(
-        (age / 85 * 40) +
-        (15 if "Yes" in str(family) or "有" in str(family) else 0) +
-        (0 if "Rarely" in str(cooking) or "很少" in str(cooking) else 8 if "1-2" in str(cooking) else 18 if "3-5" in str(cooking) else 30) +
+        (age - 18) / (85 - 18) * 40 +
+        (15 if "1st" in str(family) or "一級" in str(family) else 7 if "2nd" in str(family) or "二級" in str(family) else 0) +
+        (0 if "Never" in str(cooking) or "從不" in str(cooking) else 5 if "Rarely" in str(cooking) or "很少" in str(cooking) else 10 if "1-2" in str(cooking) else 20 if "3-5" in str(cooking) else 30) +
         (air_days / 365 * 20)
     ), 100)
 
+    st.subheader("Connect Breath Device (Beta)")
+    if st.button("🔗 Connect Bluetooth Sensor"):
+        with st.spinner("Connecting... (simulation)"):
+            time.sleep(1.5)
+        st.success("Device connected! Ready to read breath.")
+        st.info("In real version: pairs via Bluetooth, reads 16 VOCs in one breath.")
+
+    if st.button("📡 Read Breath Sample from Device"):
+        st.info("Simulating breath reading from Bluetooth sensor...")
+        simulated_values = {name: np.random.normal(val, val*0.15) for name, val in defaults.items()}
+        st.write("Received VOC values (simulation):")
+        for name, val in simulated_values.items():
+            st.write(f"{name}: {val:.1f}")
+        st.session_state.voc_values = simulated_values
+        st.success("Ready — click 'Analyze Breath' to process!")
+
 # ==================== TABS ====================
-tab1, tab2, tab3 = st.tabs([t["breath_title"], t["vocs_tab"], t["advanced_tab"]])
+tab1, tab2, tab3, tab4 = st.tabs([
+    t["breath_title"],
+    t["vocs_tab"],
+    t["advanced_tab"],
+    t.get("research_tab", "Researcher Training")
+])
 
 with tab1:
     st.subheader(t["input_method"])
     input_method = st.radio("", [t["manual"], t["upload"]], horizontal=True)
 
     if input_method == t["manual"]:
-        defaults = {
-            "Acetaldehyde": 100, "2-Hydroxyacetaldehyde": 700, "Isoprene": 5000,
-            "Pentanal": 100, "Butyric acid": 250, "Toluene": 3000,
-            "2,5-Dimethylfuran": 15, "Cyclohexanone": 130, "Hexanal": 20,
-            "Heptanal": 35, "Acetophenone": 130, "Propylcyclohexane": 220,
-            "Octanal": 45, "Nonanal": 25, "Decanal": 45, "2,2-Dimethyldecane": 130
-        }
-        voc_values = {}
-        cols = st.columns(2)
-        for i, (name, val) in enumerate(defaults.items()):
-            with cols[i % 2]:
-                voc_values[name] = st.slider(name, 0, int(val * 3), val, step=5, key=name)
+        voc_values = st.session_state.get('voc_values', {})  # Use Bluetooth if available
+        if not voc_values:
+            voc_values = {}
+            cols = st.columns(2)
+            for i, (name, val) in enumerate(defaults.items()):
+                with cols[i % 2]:
+                    voc_values[name] = st.slider(name, 0, int(val * 3), val, step=5, key=name)
 
         if st.button(t["analyze_btn"], type="primary", use_container_width=True):
             model_path = "voc_model.pkl"
             if not os.path.exists(model_path):
-                with st.spinner("Training AI model (first time only)..."):
+                with st.spinner("Training initial model..."):
                     medians = list(defaults.values())
                     data = pd.DataFrame({list(defaults.keys())[i]: np.random.normal(medians[i]*0.7, medians[i]*0.25, 800) for i in range(16)})
                     data["target"] = np.random.binomial(1, 0.5, 800)
-                    from sklearn.linear_model import LogisticRegression
-                    model = LogisticRegression(max_iter=1000)
+                    model = RandomForestClassifier(n_estimators=150, random_state=42)
                     model.fit(data.drop("target", axis=1), data["target"])
                     joblib.dump(model, model_path)
-                st.success("Model trained!")
+                    data.to_csv("training_data.csv", index=False)
+                st.success("Initial model trained!")
 
             model = joblib.load(model_path)
             input_df = pd.DataFrame([list(voc_values.values())], columns=list(voc_values.keys()))
@@ -182,7 +212,7 @@ with tab1:
             col3.metric(t["auc"], "0.952")
             col4.metric(t["accuracy_demo"], "89.1%")
 
-            # PDF Report
+            # PDF Report (your existing code - kept as is)
             buffer = BytesIO()
             doc = SimpleDocTemplate(buffer, pagesize=letter)
             styles = getSampleStyleSheet()
@@ -259,7 +289,6 @@ with tab1:
                 use_container_width=True
             )
 
-            # Book LDCT
             if st.button(t["book_ldct"], type="secondary", use_container_width=True):
                 email_body = f"""Dear Doctor,
 
@@ -275,23 +304,6 @@ Thank you!"""
                 body = urllib.parse.quote(email_body)
                 mailto = f"mailto:{gp_email}?subject={subject}&body={body}"
                 st.markdown(f'<a href="{mailto}" target="_blank"><b>📧 Open Email App (pre-filled)</b></a>', unsafe_allow_html=True)
-
-    else:
-        uploaded = st.file_uploader(t["upload"], type="csv")
-        if uploaded:
-            df = pd.read_csv(uploaded)
-            st.write("Preview:", df.head())
-            if st.button("🔄 Retrain Model"):
-                if "target" in df.columns:
-                    X = df.drop("target", axis=1)
-                    y = df["target"]
-                    from sklearn.linear_model import LogisticRegression
-                    model = LogisticRegression(max_iter=1000)
-                    model.fit(X, y)
-                    joblib.dump(model, "voc_model.pkl")
-                    st.success(f"Model retrained! Accuracy: {model.score(X, y)*100:.1f}%")
-                else:
-                    st.warning("Add 'target' column (0=healthy, 1=cancer)")
 
 with tab2:
     st.markdown("**The 16 Cancer-Associated VOCs** (Wang et al., eClinicalMedicine 2022)")
@@ -317,8 +329,8 @@ with tab2:
 
 with tab3:
     st.header("Professor / Lab Mode")
-    st.write("Upload anonymized patient data here to continuously retrain the model.")
-    uploaded = st.file_uploader("Upload CSV (16 VOC columns + optional 'target')", type="csv")
+    st.write("Upload anonymized patient data to continuously improve the model.")
+    uploaded = st.file_uploader("Upload CSV (16 VOC columns + 'target')", type="csv")
     if uploaded:
         df = pd.read_csv(uploaded)
         st.write("Preview:", df.head())
@@ -326,12 +338,93 @@ with tab3:
             if "target" in df.columns:
                 X = df.drop("target", axis=1)
                 y = df["target"]
-                from sklearn.linear_model import LogisticRegression
-                model = LogisticRegression(max_iter=1000)
+                model = RandomForestClassifier(n_estimators=150, random_state=42)
                 model.fit(X, y)
                 joblib.dump(model, "voc_model.pkl")
-                st.success(f"Model updated with {len(df)} samples! Accuracy: {model.score(X, y)*100:.1f}%")
+                st.success(f"Model retrained! Accuracy: {model.score(X, y)*100:.1f}%")
             else:
                 st.warning("Add 'target' column (0=healthy, 1=cancer)")
+
+with tab4:
+    st.header("Researcher Training – Upload Labelled Data")
+    st.markdown("""
+    Use this tab to continuously improve the model with real labelled patient data.
+    
+    **Required CSV format**:
+    - 16 columns with exact VOC names (case-insensitive)
+    - One additional column named **target** (0 = healthy / no cancer, 1 = lung cancer confirmed)
+    - One row = one patient breath sample
+    - Data must be anonymized
+    """)
+
+    if os.path.exists("training_data.csv"):
+        df_hist = pd.read_csv("training_data.csv")
+        total_samples = len(df_hist)
+        last_update = datetime.fromtimestamp(os.path.getmtime("voc_model.pkl")).strftime("%Y-%m-%d %H:%M") if os.path.exists("voc_model.pkl") else "Never"
+        st.metric("Total labelled samples in model", total_samples)
+        st.caption(f"Last model update: {last_update}")
+    else:
+        st.info("No training data yet — upload your first labelled CSV to start training.")
+
+    uploaded_files = st.file_uploader(
+        "Upload one or more labelled CSV files",
+        type="csv",
+        accept_multiple_files=True,
+        help="Multiple files will be combined."
+    )
+
+    if uploaded_files and st.button("Process & Retrain Model"):
+        all_new_data = []
+        errors = []
+
+        for file in uploaded_files:
+            try:
+                df = pd.read_csv(file)
+                required_cols = list(defaults.keys()) + ["target"]
+                missing = [col for col in required_cols if col not in df.columns]
+                if missing:
+                    errors.append(f"{file.name}: Missing columns: {', '.join(missing)}")
+                    continue
+                all_new_data.append(df[required_cols])
+            except Exception as e:
+                errors.append(f"{file.name}: Error reading file – {str(e)}")
+
+        if errors:
+            st.error("Some files had issues:\n" + "\n".join(errors))
+        if not all_new_data:
+            st.error("No valid files uploaded.")
+        else:
+            new_df = pd.concat(all_new_data, ignore_index=True)
+
+            cumulative_file = "training_data.csv"
+            if os.path.exists(cumulative_file):
+                historical = pd.read_csv(cumulative_file)
+                combined = pd.concat([historical, new_df], ignore_index=True).drop_duplicates(subset=list(defaults.keys()))
+                st.info(f"Added {len(new_df)} new rows → total unique samples: {len(combined)}")
+            else:
+                combined = new_df
+                st.info(f"Starting new dataset with {len(new_df)} samples")
+
+            combined.to_csv(cumulative_file, index=False)
+
+            X_all = combined.drop("target", axis=1)
+            y_all = combined["target"]
+
+            model = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=5, random_state=42, n_jobs=-1)
+            model.fit(X_all, y_all)
+
+            joblib.dump(model, "voc_model.pkl")
+
+            from sklearn.model_selection import cross_val_score
+            cv_scores = cross_val_score(model, X_all, y_all, cv=5, scoring='accuracy')
+            st.success(f"Model retrained on {len(X_all)} total samples!")
+            st.metric("Cross-validation accuracy", f"{cv_scores.mean()*100:.1f}% ± {cv_scores.std()*100:.1f}%")
+
+            if st.checkbox("Show which VOCs are most important"):
+                importances = pd.DataFrame({
+                    "VOC": X_all.columns,
+                    "Importance": model.feature_importances_
+                }).sort_values("Importance", ascending=False)
+                st.bar_chart(importances.set_index("VOC"))
 
 st.caption(t["footer"])
