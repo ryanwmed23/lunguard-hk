@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Lung Cancer VOC Classifier
 
 A complete Python-based machine learning system for lung cancer detection using 16 Volatile Organic Compounds (VOCs) from exhaled breath analysis, based on the Wang 2022 study.
@@ -137,3 +138,7 @@ Based on Wang 2022 study on volatile organic compounds in exhaled breath for lun
 ## License
 
 This project is for research and educational purposes.
+=======
+# lunguard-hk
+Non-smoker lung cancer breath screening prototype
+>>>>>>> 7e6bc2b3595eb498dea4f521d48a2a9649dc3220
