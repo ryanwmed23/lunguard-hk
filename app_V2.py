@@ -222,7 +222,11 @@ def extract_time_series_features(df_row):
 
         slopes = np.diff(ts)
         features[f"{sensor}_max_slope"] = np.max(np.abs(slopes)) if len(slopes) > 0 else 0
-        features[f"{sensor}_auc"]       = np.trapz(ts)
+        try:
+            auc = np.trapz(ts)
+        except AttributeError:
+            auc = np.trapezoid(ts)
+        features[f"{sensor}_auc"] = auc
 
         # FFT features
         fft_vals = np.abs(np.fft.fft(ts))[:TIME_POINTS//2]
