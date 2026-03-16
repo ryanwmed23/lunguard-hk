@@ -426,7 +426,16 @@ else:
 
             model = joblib.load(model_path)
             scaler = joblib.load(scaler_path)
-            explainer = joblib.load(explainer_path)
+            explainer = None
+            if os.path.exists(explainer_path):
+                try:
+                    explainer = joblib.load(explainer_path)
+                except Exception as e:
+                    st.warning("Saved explainer is incompatible. Creating a fresh explainer from the model. This may take a moment.")
+                    explainer = shap.TreeExplainer(model)
+            else:
+                # No explainer file – create one from the model
+                explainer = shap.TreeExplainer(model)
 
             if input_method == trans["manual"]:
                 row = {f"{s}_steady": v for s, v in sensor_steady.items()}
