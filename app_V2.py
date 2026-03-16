@@ -5,28 +5,50 @@ import joblib
 import os
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
+from reportlab.lib import colors as lib_colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
-import urllib.parse
 import time
 import glob
 import re
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_score
+import shap
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-st.set_page_config(page_title="LungGuard HK", page_icon="🫁", layout="centered", initial_sidebar_state="expanded")
+st.set_page_config(page_title="LungGuard HK – e-nose Advanced", page_icon="🫁", layout="wide")
+
+# ==================== CONFIG & CONSTANTS ====================
+NUM_SENSORS = 12
+TIME_POINTS = 29
+
+SENSOR_NAMES = [
+    "TGS2600", "TGS2602", "TGS2620",
+    "MQ2", "MQ3", "MQ4", "MQ5",
+    "MQ6", "MQ7", "MQ9", "MC135", "Alkane"
+]
+
+FEATURE_COLUMNS = []
+for s in SENSOR_NAMES:
+    FEATURE_COLUMNS.extend([
+        f"{s}_steady", f"{s}_rise_time", f"{s}_max_slope", f"{s}_auc",
+        f"{s}_mean", f"{s}_std", f"{s}_max", f"{s}_min",
+        f"{s}_fft1", f"{s}_fft2", f"{s}_fft3", f"{s}_fft4", f"{s}_dominant_freq"
+    ])
 
 # ==================== TRANSLATIONS ====================
 translations = {
     "en": {
-        "title": "🫁 LungGuard HK",
-        "subtitle": "Non-Smoker Lung Cancer Breath Screening",
+        "title": "🫁 LungGuard HK – Advanced e-nose",
+        "subtitle": "Breathprint Recognition with Time-Series + FFT Features",
         "language": "Language",
-        "baseline_title": "Non-Smoker Risk Calculator",
+        "baseline_title": "Baseline Risk Factors",
         "breath_title": "Breath Analysis",
-        "vocs_tab": "16 VOCs",
+        "sensors_tab": "Sensor Features",
         "research_tab": "🔬 Researcher Mode",
         "age": "Age",
         "gender": "Gender",
@@ -34,38 +56,37 @@ translations = {
         "air_days": "HK Poor Air Quality Days (last year)",
         "family": "Family History of Lung Cancer",
         "input_method": "Input Method",
-        "manual": "Manual Entry (Sliders)",
-        "upload": "Upload CSV (Patient Screening)",
-        "analyze_btn": "🚀 Analyze Breath",
-        "book_ldct": "📅 Book AI-LDCT Now",
-        "risk": "Your Total Risk",
-        "breath_risk": "Breath VOC Risk",
+        "manual": "Manual Steady-State Values (simplified)",
+        "upload": "Upload Full Time-Series Sensor CSV",
+        "analyze_btn": "🚀 Analyze Breathprint",
+        "risk": "Estimated Total Risk",
+        "breath_risk": "Breathprint Risk (XGBoost)",
         "baseline_risk": "Baseline Risk",
         "high": "HIGH RISK",
         "medium": "MEDIUM RISK",
         "low": "LOW RISK",
-        "metrics_title": "Model Performance (Wang et al. 2022)",
-        "sensitivity": "Sensitivity",
-        "specificity": "Specificity",
-        "auc": "AUC",
-        "accuracy_demo": "Accuracy (demo)",
-        "footer": "LungGuard HK v1.0 • Research & Demo Only • Not a medical device",
-        "pdf_title": "LungGuard HK Risk Report",
+        "metrics_title": "Model Performance",
+        "footer": "LungGuard HK v4.3 – e-nose + Time-Series + FFT • Research Prototype Only • Not a medical device",
+        "pdf_title": "LungGuard HK e-nose Report",
         "pdf_date": "Date",
         "pdf_patient": "Patient Summary",
         "pdf_overall": "Overall Risk Assessment",
-        "pdf_voc_table": "VOC Analysis",
+        "pdf_sensor_table": "Sensor Steady-State Readings",
+        "pdf_shap_table": "Top SHAP Sensor Features",
         "pdf_recommend": "Recommendation",
         "pdf_recommend_text": "Discuss this report with your doctor. Consider AI-LDCT referral if medium or high risk.",
         "prototype_warning": "⚠️ Research prototype only • Not a medical device • For pilot testing purposes",
+        "model_ready": "Model loaded and ready for analysis",
+        "no_model": "No trained model found. Train in Researcher mode first.",
+        "model_found_disk": "Model file found on disk (may be old – retrain if needed)",
     },
     "zh": {
-        "title": "🫁 LungGuard HK",
-        "subtitle": "非吸煙者肺癌呼吸篩查",
+        "title": "🫁 LungGuard HK – 進階電子鼻",
+        "subtitle": "帶時間序列與FFT特徵的呼吸印記識別",
         "language": "語言",
-        "baseline_title": "非吸煙者風險計算器",
+        "baseline_title": "基線風險因素",
         "breath_title": "呼吸分析",
-        "vocs_tab": "16 VOCs",
+        "sensors_tab": "感測器特徵",
         "research_tab": "🔬 研究者模式",
         "age": "年齡",
         "gender": "性別",
@@ -73,41 +94,39 @@ translations = {
         "air_days": "去年不良空氣質素日數",
         "family": "肺癌家族病史",
         "input_method": "輸入方式",
-        "manual": "手動輸入（滑桿）",
-        "upload": "上傳 CSV（病人篩查）",
-        "analyze_btn": "🚀 分析呼吸樣本",
-        "book_ldct": "📅 立即預約 AI-LDCT",
-        "risk": "您的總風險",
-        "breath_risk": "呼吸 VOC 風險",
+        "manual": "手動穩態值（簡化）",
+        "upload": "上傳完整時間序列感測器 CSV",
+        "analyze_btn": "🚀 分析呼吸印記",
+        "risk": "估計總風險",
+        "breath_risk": "呼吸印記風險（XGBoost）",
         "baseline_risk": "基線風險",
         "high": "高風險",
         "medium": "中風險",
         "low": "低風險",
-        "metrics_title": "模型效能（Wang et al. 2022）",
-        "sensitivity": "敏感度",
-        "specificity": "特異度",
-        "auc": "AUC",
-        "accuracy_demo": "準確度（示範）",
-        "footer": "LungGuard HK v1.0 • 僅供研究及示範 • 非醫療儀器",
-        "pdf_title": "LungGuard HK 風險報告",
+        "metrics_title": "模型效能",
+        "footer": "LungGuard HK v4.3 – 電子鼻 + 時間序列 + FFT • 研究原型 • 非醫療儀器",
+        "pdf_title": "LungGuard HK 電子鼻報告",
         "pdf_date": "日期",
         "pdf_patient": "病人摘要",
         "pdf_overall": "整體風險評估",
-        "pdf_voc_table": "VOC 分析",
+        "pdf_sensor_table": "感測器穩態讀數",
+        "pdf_shap_table": "SHAP 前列感測器特徵",
         "pdf_recommend": "建議",
         "pdf_recommend_text": "請與醫生討論此報告。如為中或高風險，請考慮 AI-LDCT 轉介。",
         "prototype_warning": "⚠️ 僅為研究原型 • 非醫療儀器 • 僅用於試點測試",
+        "model_ready": "模型已載入，可進行分析",
+        "no_model": "未找到已訓練模型。請先在研究者模式中訓練。",
+        "model_found_disk": "已找到模型檔案（可能為舊版 – 如有需要請重新訓練）",
     }
 }
 
 lang_code = st.sidebar.selectbox("語言 / Language", ["English", "繁體中文"], index=0)
 lang = "en" if lang_code == "English" else "zh"
-t = translations[lang]
+trans = translations[lang]
 
-# ==================== MODE SELECTOR – SIDE BY SIDE ====================
+# ==================== MODE SELECTOR ====================
 st.markdown("<h3 style='text-align: center; margin-bottom: 8px;'>Select Mode</h3>", unsafe_allow_html=True)
 
-# Safe read of current mode
 if "mode" not in st.session_state:
     st.session_state.mode = "👤 User / Patient Screening"
 
@@ -121,7 +140,7 @@ with mode_col1:
         "👤 Patient\nScreening mode",
         use_container_width=True,
         type="primary" if patient_active else "secondary",
-        key="btn_patient"
+        key="btn_patient_v4"
     ):
         st.session_state.mode = "👤 User / Patient Screening"
         st.rerun()
@@ -132,7 +151,7 @@ with mode_col2:
         "🔬 Researcher\nTraining mode",
         use_container_width=True,
         type="primary" if researcher_active else "secondary",
-        key="btn_researcher"
+        key="btn_researcher_v4"
     ):
         st.session_state.mode = "🔬 Researcher Mode"
         st.rerun()
@@ -141,29 +160,21 @@ mode = st.session_state.mode
 
 st.markdown("---")
 
-st.title(t["title"])
-st.caption(t["subtitle"])
+st.title(trans["title"])
+st.caption(trans["subtitle"])
 
-# ==================== GLOBAL DEFAULTS ====================
-defaults = {
-    "Acetaldehyde": 100, "2-Hydroxyacetaldehyde": 700, "Isoprene": 5000,
-    "Pentanal": 100, "Butyric acid": 250, "Toluene": 3000,
-    "2,5-Dimethylfuran": 15, "Cyclohexanone": 130, "Hexanal": 20,
-    "Heptanal": 35, "Acetophenone": 130, "Propylcyclohexane": 220,
-    "Octanal": 45, "Nonanal": 25, "Decanal": 45, "2,2-Dimethyldecane": 130
-}
-
-# ==================== SIDEBAR – BASELINE (only Patient mode) ====================
+# ==================== SIDEBAR – BASELINE RISK ====================
+baseline_score = 22
 if mode == "👤 User / Patient Screening":
     with st.sidebar:
-        st.header(t["baseline_title"])
-        age = st.slider(t["age"], 18, 85, 45)
-        gender = st.selectbox(t["gender"], ["Female", "Male"] if lang == "en" else ["女性", "男性"])
-        cooking = st.selectbox(t["cooking"], 
+        st.header(trans["baseline_title"])
+        age = st.slider(trans["age"], 18, 85, 45)
+        gender = st.selectbox(trans["gender"], ["Female", "Male"] if lang == "en" else ["女性", "男性"])
+        cooking = st.selectbox(trans["cooking"], 
                                ["Never","Rarely", "1-2x/week", "3-5x/week", "Daily"] if lang == "en" 
                                else ["從不", "很少", "每週1-2次", "每週3-5次", "每日"])
-        air_days = st.slider(t["air_days"], 0, 365, 120)
-        family = st.selectbox(t["family"], 
+        air_days = st.slider(trans["air_days"], 0, 365, 120)
+        family = st.selectbox(trans["family"], 
                               ["No", "Yes (1st degree)", "Yes (2nd degree)"] if lang == "en" 
                               else ["無", "有（一級親屬）", "有（二級親屬）"])
 
@@ -175,370 +186,462 @@ if mode == "👤 User / Patient Screening":
         ), 100)
 
         st.progress(baseline_score / 100)
-        st.caption(f"{t['baseline_risk']}: {baseline_score}%")
-else:
-    age, gender, cooking, air_days, family = 45, "Female" if lang == "en" else "女性", "Never" if lang == "en" else "從不", 120, "No" if lang == "en" else "無"
-    baseline_score = 22
+        st.caption(f"{trans['baseline_risk']}: {baseline_score}%")
 
-# ==================== MAIN CONTENT ====================
-if mode == "👤 User / Patient Screening":
-    tab1, tab2 = st.tabs([t["breath_title"], t["vocs_tab"]])
-
-    with tab1:
-        st.subheader(t["input_method"])
-        input_method = st.radio("", [t["manual"], t["upload"]], horizontal=True)
-
-        results = []
-        is_batch = False
-        voc_values = {}
-        samples = []
-        voc_dict_list = []
-
-        if input_method == t["manual"]:
-            with st.expander("Hardware Connection (Beta)", expanded=False):
-                if st.button("🔗 Connect Bluetooth Sensor"):
-                    with st.spinner("Connecting... (simulation)"):
-                        time.sleep(1.5)
-                    st.success("Device connected! Ready to read breath.")
-                    st.info("In real version: pairs via Bluetooth, reads 16 VOCs in one breath.")
-
-                if st.button("📡 Read Breath Sample from Device"):
-                    st.info("Simulating breath reading from Bluetooth sensor...")
-                    simulated_values = {name: np.random.normal(val, val*0.15) for name, val in defaults.items()}
-                    st.write("Received VOC values (simulation):")
-                    for name, val in simulated_values.items():
-                        st.write(f"{name}: {val:.1f}")
-                    st.session_state.voc_values = simulated_values
-                    st.success("Ready — click 'Analyze Breath' to process!")
-
-            voc_values = st.session_state.get('voc_values', {})
-            if not voc_values:
-                voc_values = {}
-                cols = st.columns(2)
-                for i, (name, val) in enumerate(defaults.items()):
-                    with cols[i % 2]:
-                        voc_values[name] = st.slider(name, 0, int(val * 3), val, step=5, key=f"manual_{name}")
-
-            voc_dict_list = [voc_values]
-
-        else:
-            uploaded = st.file_uploader("Upload patient breath CSV (16 VOC columns only)", type="csv")
-            if uploaded:
-                try:
-                    df = pd.read_csv(uploaded)
-                    missing = [col for col in defaults.keys() if col not in df.columns]
-                    if missing:
-                        st.error(f"Missing columns: {', '.join(missing)}")
-                    else:
-                        st.success(f"Loaded {len(df)} patient sample(s)")
-                        st.session_state.uploaded_df = df
-                except Exception as e:
-                    st.error(f"Error reading file: {str(e)}")
-
-        if st.button(t["analyze_btn"], type="primary", use_container_width=True):
-            model_path = "voc_model.pkl"
-            if not os.path.exists(model_path):
-                with st.spinner("Training initial model..."):
-                    medians = list(defaults.values())
-                    data = pd.DataFrame({list(defaults.keys())[i]: np.random.normal(medians[i]*0.7, medians[i]*0.25, 800) for i in range(16)})
-                    data["target"] = np.random.binomial(1, 0.5, 800)
-                    model = RandomForestClassifier(n_estimators=150, random_state=42)
-                    model.fit(data.drop("target", axis=1), data["target"])
-                    joblib.dump(model, model_path)
-                    data.to_csv("training_data_latest.csv", index=False)
-                st.success("Initial model trained!")
-
-            model = joblib.load(model_path)
-
-            if input_method == t["manual"]:
-                if not voc_values:
-                    st.warning("Please enter VOC values first.")
-                    st.stop()
-                samples = [pd.Series(voc_values)]
-                is_batch = False
-                voc_dict_list = [voc_values]
+# ==================== FEATURE ENGINEERING FUNCTION ====================
+def extract_time_series_features(df_row):
+    """df_row must be a DataFrame (even single row)"""
+    features = {}
+    for sensor in SENSOR_NAMES:
+        cols = [f"{sensor}_t{i+1}" for i in range(TIME_POINTS)]
+        if not all(c in df_row.columns for c in cols):
+            if f"{sensor}_steady" in df_row.columns:
+                steady = df_row[f"{sensor}_steady"].iloc[0]
+                ts = np.full(TIME_POINTS, steady)  # flat line fallback
             else:
-                if 'uploaded_df' not in st.session_state:
-                    st.warning("Please upload a valid CSV first.")
-                    st.stop()
-                df_upload = st.session_state.uploaded_df
-                samples = [row for _, row in df_upload.iterrows()]
-                is_batch = len(samples) > 1
-                voc_dict_list = [row.to_dict() for row in samples]
+                continue
+        else:
+            ts = df_row[cols].values.flatten().astype(float)
 
-            results = []
-            for idx, (sample, voc_dict) in enumerate(zip(samples, voc_dict_list)):
-                input_df = pd.DataFrame([sample[list(defaults.keys())] if isinstance(sample, pd.Series) else sample], columns=list(defaults.keys()))
+        if len(ts) != TIME_POINTS or np.any(np.isnan(ts)):
+            continue
 
-                breath_prob = model.predict_proba(input_df)[0][1] * 100
-                total_risk = int(0.6 * breath_prob + 0.4 * baseline_score)
+        features[f"{sensor}_steady"]    = ts[-1]
+        features[f"{sensor}_mean"]      = np.mean(ts)
+        features[f"{sensor}_std"]       = np.std(ts)
+        features[f"{sensor}_max"]       = np.max(ts)
+        features[f"{sensor}_min"]       = np.min(ts)
 
-                level = t["high"] if total_risk >= 70 else t["medium"] if total_risk >= 40 else t["low"]
-                color = "#ff4b4b" if total_risk >= 70 else "#ffaa00" if total_risk >= 40 else "#00cc00"
+        diff = ts - ts[0]
+        max_diff = np.max(diff)
+        rise_time = 0
+        if max_diff > 0:
+            rise_idx = np.argmax(diff >= 0.9 * max_diff)
+            rise_time = rise_idx
+        features[f"{sensor}_rise_time"] = rise_time
 
-                if is_batch:
-                    results.append({
-                        "Sample": idx + 1,
-                        "Breath VOC Risk (%)": round(breath_prob, 1),
-                        "Total Risk (%)": total_risk,
-                        "Risk Level": level,
-                        **voc_dict
-                    })
-                else:
-                    st.markdown(f"<h2 style='color:{color}'>{t['risk']}: {total_risk}% — {level}</h2>", unsafe_allow_html=True)
-                    st.progress(total_risk / 100)
-                    st.write(f"**{t['breath_risk']}**: {round(breath_prob, 1)}%")
-                    st.write(f"**{t['baseline_risk']}**: {baseline_score}%")
+        slopes = np.diff(ts)
+        features[f"{sensor}_max_slope"] = np.max(np.abs(slopes)) if len(slopes) > 0 else 0
+        features[f"{sensor}_auc"]       = np.trapz(ts)
 
-                    st.subheader(t["metrics_title"])
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric(t["sensitivity"], "89.2%")
-                    col2.metric(t["specificity"], "89.1%")
-                    col3.metric(t["auc"], "0.952")
-                    col4.metric(t["accuracy_demo"], "89.1%")
+        # FFT features
+        fft_vals = np.abs(np.fft.fft(ts))[:TIME_POINTS//2]
+        fft_freq = np.fft.fftfreq(TIME_POINTS)[:TIME_POINTS//2]
+        top_idx = np.argsort(fft_vals)[::-1][:4]
+        for i, idx in enumerate(top_idx, 1):
+            features[f"{sensor}_fft{i}"] = fft_vals[idx]
+        features[f"{sensor}_dominant_freq"] = fft_freq[top_idx[0]] if len(top_idx) > 0 else 0
 
-                    buffer = BytesIO()
-                    doc = SimpleDocTemplate(buffer, pagesize=letter)
-                    styles = getSampleStyleSheet()
-                    elements = []
+    return features
 
-                    elements.append(Paragraph(t["pdf_title"], styles['Title']))
-                    elements.append(Spacer(1, 12))
-                    elements.append(Paragraph(f"{t['pdf_date']}: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles['Normal']))
-                    elements.append(Spacer(1, 24))
+# ==================== RESEARCHER MODE ====================
+if mode == "🔬 Researcher Mode":
+    st.header("🔬 Researcher Mode – Advanced e-nose Training")
 
-                    elements.append(Paragraph(t["pdf_patient"], styles['Heading2']))
-                    patient_data = [
-                        [t["age"], str(age)],
-                        [t["gender"], gender],
-                        [t["cooking"], cooking],
-                        [t["air_days"], str(air_days)],
-                        [t["family"], family],
-                        [t["baseline_risk"], f"{baseline_score}%"]
-                    ]
-                    patient_table = Table(patient_data, colWidths=[180, 300])
-                    patient_table.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                    ]))
-                    elements.append(patient_table)
-                    elements.append(Spacer(1, 24))
-
-                    elements.append(Paragraph(t["pdf_overall"], styles['Heading2']))
-                    risk_color = colors.red if total_risk >= 70 else colors.orange if total_risk >= 40 else colors.green
-                    risk_text = f"<font color='{risk_color.hexval()}'>{total_risk}% — {level}</font>"
-                    elements.append(Paragraph(risk_text, styles['Heading3']))
-                    elements.append(Spacer(1, 12))
-
-                    elements.append(Paragraph(t["pdf_voc_table"], styles['Heading2']))
-                    voc_rows = [["VOC", "Your Value", "Risk Level"]]
-                    healthy_medians = list(defaults.values())
-                    row_colors = []
-
-                    for i, (name, value) in enumerate(voc_dict.items()):
-                        healthy_median = healthy_medians[i]
-                        if value > healthy_median * 1.8:
-                            row_colors.append(colors.red)
-                            level_text = "High" if lang == "en" else "高"
-                        elif value > healthy_median * 1.2:
-                            row_colors.append(colors.orange)
-                            level_text = "Medium" if lang == "en" else "中"
-                        else:
-                            row_colors.append(colors.green)
-                            level_text = "Low" if lang == "en" else "低"
-                        voc_rows.append([name, f"{float(value):.1f}", level_text])
-
-                    voc_table = Table(voc_rows, colWidths=[200, 120, 160])
-                    voc_table.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.lightblue),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-                    ]))
-
-                    for row_idx, color in enumerate(row_colors, start=1):
-                        voc_table.setStyle(TableStyle([('BACKGROUND', (2, row_idx), (2, row_idx), color)]))
-
-                    elements.append(voc_table)
-                    elements.append(Spacer(1, 24))
-
-                    elements.append(Paragraph(t["pdf_recommend"], styles['Heading2']))
-                    elements.append(Paragraph(t["pdf_recommend_text"], styles['Normal']))
-
-                    doc.build(elements)
-                    buffer.seek(0)
-
-                    st.download_button(
-                        label="📄 Download Professional PDF Report",
-                        data=buffer,
-                        file_name=f"LungGuard_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-
-            if is_batch and results:
-                results_df = pd.DataFrame(results)
-                st.subheader("Batch Analysis Results")
-                st.dataframe(results_df.style.format(precision=1), use_container_width=True)
-
-                csv = results_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label="📥 Download Batch Results CSV",
-                    data=csv,
-                    file_name=f"LungGuard_Batch_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-
-    with tab2:
-        st.markdown("**The 16 Cancer-Associated VOCs** (Wang et al., eClinicalMedicine 2022)")
-        voc_data = pd.DataFrame([
-            {"VOC": "Isoprene", "Median in LC patients": 6062, "Strength": "Strongest (AUC 0.859)", "Notes": "Highest individual predictor"},
-            {"VOC": "Hexanal", "Median in LC patients": 26, "Strength": "Very strong (AUC 0.843)", "Notes": "Most common aldehyde"},
-            {"VOC": "Pentanal", "Median in LC patients": 112, "Strength": "Strong", "Notes": "Top-8 panel"},
-            {"VOC": "Propylcyclohexane", "Median in LC patients": 254, "Strength": "Strong", "Notes": "Top-8 panel"},
-            {"VOC": "Nonanal", "Median in LC patients": 31, "Strength": "Strong", "Notes": "Top-8 panel"},
-            {"VOC": "2,2-Dimethyldecane", "Median in LC patients": 158, "Strength": "Strong", "Notes": "Top-8 panel"},
-            {"VOC": "Heptanal", "Median in LC patients": 39, "Strength": "Moderate-strong", "Notes": "Top-8 panel"},
-            {"VOC": "Decanal", "Median in LC patients": 57, "Strength": "Moderate-strong", "Notes": "Top-8 panel"},
-            {"VOC": "Toluene", "Median in LC patients": 3345, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "2,5-Dimethylfuran", "Median in LC patients": 19, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "Acetophenone", "Median in LC patients": 148, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "Cyclohexanone", "Median in LC patients": 150, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "Butyric acid", "Median in LC patients": 298, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "Octanal", "Median in LC patients": 58, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "2-Hydroxyacetaldehyde", "Median in LC patients": 782, "Strength": "Moderate", "Notes": "Elevated in cancer"},
-            {"VOC": "Acetaldehyde", "Median in LC patients": 137, "Strength": "Moderate", "Notes": "Elevated in cancer"}
-        ])
-        st.dataframe(voc_data, use_container_width=True, hide_index=True)
-
-else:  # Researcher Mode
-    st.header("🔬 Researcher / Lab Mode – Continuous Model Training")
-    st.info("This section allows uploading labelled breath data (with 'target' column) to retrain and improve the VOC model over time.")
-
-    # Password handling with session persistence
     if "researcher_authenticated" not in st.session_state:
         st.session_state.researcher_authenticated = False
 
-    if st.session_state.researcher_authenticated:
-        st.success("✅ Researcher access already granted (session remembered)")
+    if not st.session_state.researcher_authenticated:
+        st.markdown("**Researcher Password** (current: **lunguard2026**)")
+        pw = st.text_input("", type="password", placeholder="Enter lunguard2026 and press Enter", label_visibility="collapsed")
+        if pw == "lunguard2026":
+            st.session_state.researcher_authenticated = True
+            st.success("Access granted! (session remembered)")
+            st.rerun()
     else:
-        st.markdown(
-            "**Researcher Password**  "
-            "(current code for this prototype: **lunguard2026**)"
-        )
-        password_input = st.text_input(
-            label="",
-            type="password",
-            key="researcher_pw_input",
-            placeholder="Enter lunguard2026 and press Enter to apply 🔑",
-            label_visibility="collapsed",
-            help="Press the Enter key on your keyboard after typing to submit"
-        )
+        st.success("✅ Researcher access granted")
 
-        if password_input:
-            if password_input == "lunguard2026":
-                st.session_state.researcher_authenticated = True
-                st.success("✅ Access granted! (you won't need to enter it again in this session)")
-                st.rerun()
-            else:
-                st.error("Incorrect password. Try again.")
-
-    # Protected researcher content – only shown after authentication
-    if st.session_state.researcher_authenticated:
         st.markdown("""
-        **Upload labelled data for continuous training**
-        - Files must contain the exact 16 VOC column names + one column named **target** (0 = healthy, 1 = lung cancer)
-        - You can upload multiple CSV files at once — they will be merged
-        - Each training run saves a versioned snapshot and updates the latest file
+        **Upload format**: CSV with columns  
+        TGS2600_t1 … TGS2600_t29, MQ2_t1 … MQ2_t29, … (12 sensors × 29 points) + target (0/1)
         """)
 
-        latest_file = "training_data_latest.csv"
-        if os.path.exists(latest_file):
-            df_hist = pd.read_csv(latest_file)
-            total_samples = len(df_hist)
-            last_update = datetime.fromtimestamp(os.path.getmtime("voc_model.pkl")).strftime("%Y-%m-%d %H:%M") if os.path.exists("voc_model.pkl") else "Never"
-            st.metric("Total labelled samples in current model", total_samples)
-            st.caption(f"Last model update: {last_update}")
-        else:
-            st.info("No labelled training data yet. Upload your first file(s) to begin.")
+        if st.button("Generate Synthetic Time-Series Data (200 samples)", use_container_width=True):
+            np.random.seed(42)
+            n = 200
+            healthy_base = 2500
+            cancer_shift = 700
 
-        uploaded_files = st.file_uploader(
-            "Upload one or more labelled CSV files",
-            type="csv",
-            accept_multiple_files=True,
-            help="All files must have the 16 VOC columns + 'target'"
-        )
+            data = []
+            targets = []
+            for i in range(n):
+                base = healthy_base if i < n//2 else healthy_base + cancer_shift
+                row = {}
+                for s in SENSOR_NAMES:
+                    time_axis = np.linspace(0, 10, TIME_POINTS)
+                    steady = base + np.random.normal(0, 150)
+                    curve = steady / (1 + np.exp(-0.8*(time_axis - 4))) + np.random.normal(0, 80, TIME_POINTS)
+                    for j, val in enumerate(curve, 1):
+                        row[f"{s}_t{j}"] = val
+                data.append(row)
+                targets.append(0 if i < n//2 else 1)
 
-        if uploaded_files and st.button("📤 Process Files & Retrain Model", type="primary", use_container_width=True):
-            all_new_data = []
+            df_syn = pd.DataFrame(data)
+            df_syn["target"] = targets
+            df_syn.to_csv("synthetic_e_nose_timeseries.csv", index=False)
+            st.success("Synthetic dataset created (100 healthy + 100 cancer-like patterns)")
+            st.download_button(
+                "Download synthetic CSV",
+                df_syn.to_csv(index=False).encode('utf-8'),
+                "synthetic_e_nose_timeseries.csv",
+                mime="text/csv"
+            )
+
+        uploaded_files = st.file_uploader("Upload labelled time-series CSV file(s)", type="csv", accept_multiple_files=True)
+
+        if uploaded_files and st.button("📤 Preprocess, Augment & Train XGBoost", type="primary", use_container_width=True):
+            all_raw = []
             errors = []
 
             for file in uploaded_files:
                 try:
                     df = pd.read_csv(file)
-                    required_cols = list(defaults.keys()) + ["target"]
-                    missing = [col for col in required_cols if col not in df.columns]
-                    if missing:
-                        errors.append(f"{file.name}: Missing columns → {', '.join(missing)}")
+                    if "target" not in df.columns:
+                        errors.append(f"{file.name}: No 'target' column")
                         continue
-                    all_new_data.append(df[required_cols])
+                    all_raw.append(df)
                 except Exception as e:
-                    errors.append(f"{file.name}: Read error → {str(e)}")
+                    errors.append(f"{file.name}: Read error – {str(e)}")
 
             if errors:
-                st.error("Issues found:\n" + "\n".join(errors))
+                st.error("\n".join(errors))
+            elif all_raw:
+                raw_data = pd.concat(all_raw, ignore_index=True)
 
-            if not all_new_data:
-                st.warning("No valid files to process.")
+                feature_rows = []
+                for idx, row_series in raw_data.iterrows():
+                    row_df = pd.DataFrame([row_series.to_dict()])
+                    feats = extract_time_series_features(row_df)
+                    if feats:
+                        feats["target"] = row_series["target"]
+                        feature_rows.append(feats)
+
+                if not feature_rows:
+                    st.error("No valid time-series data found after feature extraction.")
+                    st.stop()
+
+                df_features = pd.DataFrame(feature_rows)
+
+                if len(df_features) < 200:
+                    st.info(f"Small dataset ({len(df_features)} samples) → applying Gaussian noise augmentation")
+                    aug_rows = []
+                    for _ in range(3):
+                        aug = df_features[FEATURE_COLUMNS].copy()
+                        noise = np.random.normal(0, 0.035, aug.shape)
+                        aug_noisy = aug * (1 + noise)
+                        aug_noisy["target"] = df_features["target"]
+                        aug_rows.append(aug_noisy)
+                    df_aug = pd.concat(aug_rows, ignore_index=True)
+                    df_features = pd.concat([df_features, df_aug], ignore_index=True)
+
+                X = df_features[FEATURE_COLUMNS]
+                y = df_features["target"]
+
+                scaler = StandardScaler()
+                X_scaled = scaler.fit_transform(X)
+                joblib.dump(scaler, "e_nose_feature_scaler.pkl")
+
+                X_train, X_val, y_train, y_val = train_test_split(
+                    X_scaled, y, test_size=0.2, stratify=y, random_state=42
+                )
+
+                model = xgb.XGBClassifier(
+                    n_estimators=500,
+                    max_depth=6,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    random_state=42,
+                    eval_metric="auc",
+                    early_stopping_rounds=30
+                )
+
+                model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_val, y_val)],
+                    verbose=False
+                )
+
+                joblib.dump(model, "e_nose_xgboost_model.pkl")
+
+                explainer = shap.TreeExplainer(model)
+                joblib.dump(explainer, "e_nose_shap_explainer.pkl")
+
+                auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+                st.success(f"Model trained successfully!\nSamples after augmentation: {len(df_features)}\nValidation AUC: {auc:.3f}")
+
+# ==================== PATIENT MODE ====================
+else:
+    tab1, tab2 = st.tabs([trans["breath_title"], trans["sensors_tab"]])
+
+    with tab1:
+        st.subheader("Input Method – e-nose Time-Series Data")
+        st.info("For full accuracy, upload a CSV with 12 sensors × 29 time points. Manual input is simplified to steady-state only.")
+
+        input_method = st.radio("", [trans["manual"], trans["upload"]], horizontal=True)
+
+        sensor_steady = {}
+        if input_method == trans["manual"]:
+            st.write("Demo: only steady-state values")
+            cols = st.columns(3)
+            for i, s in enumerate(SENSOR_NAMES):
+                with cols[i % 3]:
+                    sensor_steady[s] = st.slider(f"{s} steady-state (Ω)", 500, 8000, 2500, step=50)
+
+        else:
+            uploaded = st.file_uploader(trans["upload"], type="csv")
+            if uploaded:
+                try:
+                    df = pd.read_csv(uploaded)
+                    missing = [f"{s}_t{i+1}" for s in SENSOR_NAMES for i in range(TIME_POINTS) if f"{s}_t{i+1}" not in df.columns]
+                    if missing:
+                        st.error(f"Missing columns: {', '.join(missing[:5])}...")
+                    else:
+                        st.success(f"Loaded time-series data ({len(df)} samples)")
+                        st.session_state.sensor_timeseries_df = df
+                except Exception as e:
+                    st.error(f"Error reading CSV: {str(e)}")
+
+        # Model status check
+        model_ready = False
+        try:
+            joblib.load("e_nose_xgboost_model.pkl")
+            model_ready = True
+        except:
+            pass
+
+        if model_ready:
+            st.success(trans["model_ready"])
+        else:
+            st.warning(trans["no_model"])
+
+        if st.button(trans["analyze_btn"], type="primary", use_container_width=True):
+            model_path = "e_nose_xgboost_model.pkl"
+            scaler_path = "e_nose_feature_scaler.pkl"
+            explainer_path = "e_nose_shap_explainer.pkl"
+
+            if not all(os.path.exists(p) for p in [model_path, scaler_path, explainer_path]):
+                st.error(trans["no_model"])
+                st.stop()
+
+            model = joblib.load(model_path)
+            scaler = joblib.load(scaler_path)
+            explainer = joblib.load(explainer_path)
+
+            if input_method == trans["manual"]:
+                row = {f"{s}_steady": v for s, v in sensor_steady.items()}
+                for s in SENSOR_NAMES:
+                    steady = row[f"{s}_steady"]
+                    time_axis = np.linspace(0, 10, TIME_POINTS)
+                    curve = steady / (1 + np.exp(-1.0*(time_axis - 4))) + np.random.normal(0, 20, TIME_POINTS)
+                    for j, val in enumerate(curve, 1):
+                        row[f"{s}_t{j}"] = val
+                    row[f"{s}_rise_time"] = 10
+                    row[f"{s}_max_slope"] = 50
+                    row[f"{s}_auc"] = steady * TIME_POINTS
+                    row[f"{s}_mean"] = steady
+                    row[f"{s}_std"] = 100
+                    row[f"{s}_max"] = steady + 200
+                    row[f"{s}_min"] = steady - 200
+                    row[f"{s}_fft1"] = 100
+                    row[f"{s}_fft2"] = 50
+                    row[f"{s}_fft3"] = 30
+                    row[f"{s}_fft4"] = 10
+                    row[f"{s}_dominant_freq"] = 0.1
+                input_df = pd.DataFrame([row])
+                is_batch = False
             else:
-                new_df = pd.concat(all_new_data, ignore_index=True)
+                if 'sensor_timeseries_df' not in st.session_state:
+                    st.warning("Please upload a valid CSV first.")
+                    st.stop()
+                input_df = st.session_state.sensor_timeseries_df
+                is_batch = len(input_df) > 1
 
-                existing_versions = glob.glob("training_data_v*_*.csv")
-                version_nums = [int(re.search(r'_v(\d+)_', f).group(1)) for f in existing_versions if re.search(r'_v(\d+)_', f)]
-                next_version = max(version_nums) + 1 if version_nums else 1
+            feature_list = []
+            for _, row_series in input_df.iterrows():
+                row_df = pd.DataFrame([row_series.to_dict()])
+                feats = extract_time_series_features(row_df)
+                if feats:
+                    feature_list.append(feats)
 
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                versioned_filename = f"training_data_v{next_version}_{timestamp}.csv"
+            if not feature_list:
+                st.error("Could not extract valid features from input. Check CSV format or use manual mode.")
+                st.stop()
 
-                new_df.to_csv(versioned_filename, index=False)
+            df_features = pd.DataFrame(feature_list)
+            X_scaled = scaler.transform(df_features[FEATURE_COLUMNS])
 
-                if os.path.exists(latest_file):
-                    historical = pd.read_csv(latest_file)
-                    combined = pd.concat([historical, new_df], ignore_index=True).drop_duplicates(subset=list(defaults.keys()))
-                    st.info(f"Added {len(new_df)} new samples → total unique: {len(combined)}")
+            probs = model.predict_proba(X_scaled)[:, 1] * 100
+
+            results = []
+            for idx, prob in enumerate(probs):
+                total_risk = int(0.6 * prob + 0.4 * baseline_score)
+                level = trans["high"] if total_risk >= 70 else trans["medium"] if total_risk >= 40 else trans["low"]
+                color = "#ff4b4b" if total_risk >= 70 else "#ffaa00" if total_risk >= 40 else "#00cc00"
+
+                if is_batch:
+                    results.append({
+                        "Sample": idx + 1,
+                        "Breathprint Risk (%)": f"{prob:.3g}",
+                        "Total Risk (%)": total_risk,
+                        "Risk Level": level
+                    })
                 else:
-                    combined = new_df
-                    st.info(f"Created first dataset with {len(new_df)} samples")
+                    st.markdown(f"<h2 style='color:{color}'>{trans['risk']}: {total_risk}% — {level}</h2>", unsafe_allow_html=True)
+                    st.progress(total_risk / 100)
+                    st.write(f"**{trans['breath_risk']}**: {prob:.3g}%")
+                    st.write(f"**{trans['baseline_risk']}**: {baseline_score}%")
 
-                combined.to_csv(latest_file, index=False)
+                    st.subheader("Key Factors Driving This Risk Assessment (SHAP)")
 
-                X_all = combined.drop("target", axis=1)
-                y_all = combined["target"]
+                    shap_values_single = explainer.shap_values(X_scaled[idx:idx+1])[0]
 
-                model = RandomForestClassifier(n_estimators=200, max_depth=12, min_samples_split=5, random_state=42, n_jobs=-1)
-                model.fit(X_all, y_all)
-                joblib.dump(model, "voc_model.pkl")
+                    # Readable feature names
+                    readable_names = []
+                    for col in FEATURE_COLUMNS:
+                        sensor, feat = col.split('_', 1)
+                        feat = feat.replace('_', ' ').title()
+                        readable_names.append(f"{sensor} {feat}")
 
-                cv_scores = cross_val_score(model, X_all, y_all, cv=5, scoring='accuracy')
+                    shap_df = pd.DataFrame({
+                        'Feature': readable_names,
+                        'SHAP Value': shap_values_single
+                    })
 
-                st.success(f"Model retrained successfully! (version {next_version} – {timestamp})")
-                st.metric("Cross-validation accuracy", f"{cv_scores.mean()*100:.1f}% ± {cv_scores.std()*100:.1f}%")
-                st.metric("Total samples used", len(X_all))
+                    shap_df['Abs'] = shap_df['SHAP Value'].abs()
+                    shap_df = shap_df.sort_values('Abs', ascending=False).head(8).drop(columns='Abs')
 
-                if st.checkbox("Show feature importance"):
-                    importances = pd.DataFrame({
-                        "VOC": X_all.columns,
-                        "Importance": model.feature_importances_
-                    }).sort_values("Importance", ascending=False)
-                    st.bar_chart(importances.set_index("VOC"))
+                    fig, ax = plt.subplots(figsize=(12, 6))  # wider figure
+                    colors = ['#d62728' if x > 0 else '#2ca02c' for x in shap_df['SHAP Value']]
+
+                    bars = ax.barh(shap_df['Feature'], shap_df['SHAP Value'], color=colors, height=0.7)  # thinner bars
+
+                    for bar in bars:
+                        width = bar.get_width()
+                        ax.text(width, bar.get_y() + bar.get_height()/2,
+                                f'{width:+.3f}',
+                                ha='left' if width > 0 else 'right',
+                                va='center',
+                                fontsize=9,
+                                color='white' if abs(width) > 0.05 else 'black')
+
+                    ax.axvline(0, color='gray', linewidth=0.8)
+                    ax.set_xlabel('Impact on predicted risk (positive = increases risk)')
+                    ax.set_title('Top Factors Influencing This Breathprint Result')
+                    ax.invert_yaxis()
+                    plt.xticks(fontsize=9)
+                    plt.yticks(fontsize=10, rotation=0, ha='right')  # readable y labels
+                    plt.tight_layout(pad=2.0)  # extra padding
+                    sns.set_style("whitegrid")
+                    ax.grid(True, axis='x', linestyle='--', alpha=0.7)
+                    st.pyplot(fig)
+                    plt.close(fig)
+
+                    # PDF generation
+                    buffer = BytesIO()
+                    doc = SimpleDocTemplate(buffer, pagesize=letter)
+                    styles = getSampleStyleSheet()
+                    elements = []
+
+                    elements.append(Paragraph(trans["pdf_title"], styles['Title']))
+                    elements.append(Spacer(1, 12))
+                    elements.append(Paragraph(f"{trans['pdf_date']}: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles['Normal']))
+                    elements.append(Spacer(1, 24))
+
+                    elements.append(Paragraph(trans["pdf_patient"], styles['Heading2']))
+                    patient_data = [
+                        [trans["age"], str(age or "N/A")],
+                        [trans["gender"], gender or "N/A"],
+                        [trans["cooking"], cooking or "N/A"],
+                        [trans["air_days"], str(air_days or "N/A")],
+                        [trans["family"], family or "N/A"],
+                        [trans["baseline_risk"], f"{baseline_score}%"]
+                    ]
+                    patient_table = Table(patient_data, colWidths=[180, 300])
+                    patient_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), lib_colors.lightgrey),
+                        ('GRID', (0,0), (-1,-1), 0.5, lib_colors.grey),
+                    ]))
+                    elements.append(patient_table)
+                    elements.append(Spacer(1, 24))
+
+                    elements.append(Paragraph(trans["pdf_overall"], styles['Heading2']))
+                    risk_text = f"<font color='{color}'>{total_risk}% — {level}</font>"
+                    elements.append(Paragraph(risk_text, styles['Heading3']))
+                    elements.append(Spacer(1, 12))
+
+                    if not is_batch:
+                        elements.append(Paragraph(trans["pdf_sensor_table"], styles['Heading2']))
+                        sensor_rows = [["Sensor", "Steady-State (Ω)"]]
+                        for s in SENSOR_NAMES:
+                            val = sensor_steady.get(s, "N/A") if input_method == trans["manual"] else "N/A"
+                            sensor_rows.append([s, f"{val:.0f}" if isinstance(val, (int, float)) else val])
+                        sensor_table = Table(sensor_rows, colWidths=[200, 200])
+                        sensor_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0,0), (-1,0), lib_colors.lightblue),
+                            ('GRID', (0,0), (-1,-1), 0.5, lib_colors.grey),
+                        ]))
+                        elements.append(sensor_table)
+                        elements.append(Spacer(1, 24))
+
+                        elements.append(Paragraph(trans["pdf_shap_table"], styles['Heading2']))
+                        shap_df_pdf = pd.DataFrame({
+                            "Feature": readable_names,
+                            "SHAP Value": shap_values_single
+                        }).sort_values("SHAP Value", key=abs, ascending=False).head(10)
+                        shap_rows = [["Feature", "SHAP Contribution"]]
+                        for _, r in shap_df_pdf.iterrows():
+                            shap_rows.append([r["Feature"], f"{r['SHAP Value']:.3f}"])
+                        shap_table = Table(shap_rows, colWidths=[300, 200])
+                        shap_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0,0), (-1,0), lib_colors.lightblue),
+                            ('GRID', (0,0), (-1,-1), 0.5, lib_colors.grey),
+                        ]))
+                        elements.append(shap_table)
+                    else:
+                        elements.append(Paragraph("Batch Analysis Summary", styles['Heading2']))
+                        batch_data = [[r["Sample"], r['Breathprint Risk (%)'], f"{r['Total Risk (%)']}%", r["Risk Level"]] for r in results]
+                        batch_table = Table([["Sample", "Breathprint Risk (%)", "Total Risk (%)", "Risk Level"]] + batch_data)
+                        batch_table.setStyle(TableStyle([
+                            ('BACKGROUND', (0,0), (-1,0), lib_colors.lightblue),
+                            ('GRID', (0,0), (-1,-1), 0.5, lib_colors.grey),
+                        ]))
+                        elements.append(batch_table)
+
+                    elements.append(Spacer(1, 24))
+                    elements.append(Paragraph(trans["pdf_recommend"], styles['Heading2']))
+                    elements.append(Paragraph(trans["pdf_recommend_text"], styles['Normal']))
+
+                    doc.build(elements)
+                    buffer.seek(0)
+
+                    st.download_button(
+                        label="📄 Download PDF Report",
+                        data=buffer,
+                        file_name=f"LungGuard_e-nose_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+
+            if is_batch and results:
+                st.subheader("Batch Results")
+                st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+    with tab2:
+        st.markdown("**12 MOS Sensors + Time-Series + FFT Features**")
+        st.info("The model extracts rise time, slope, AUC, and FFT frequency components from each sensor's 29-point response curve.")
+        st.dataframe(pd.DataFrame({"Feature Type": [
+            "Steady-state", "Rise time", "Max slope", "AUC", "Mean", "Std", "Max", "Min",
+            "FFT1", "FFT2", "FFT3", "FFT4", "Dominant frequency"
+        ]}), use_container_width=True, hide_index=True)
 
 # ==================== BOTTOM WARNING & FOOTER ====================
+warning_text = trans.get('prototype_warning', '⚠️ Research prototype only • Not a medical device • For pilot testing purposes')
 st.markdown(
     "<div style='background-color:#ffebee; padding:12px; border-radius:6px; margin: 32px 0 16px 0; text-align:center;'>"
-    f"<strong>{t['prototype_warning']}</strong>"
+    f"<strong>{warning_text}</strong>"
     "</div>",
     unsafe_allow_html=True
 )
 
-st.caption(t["footer"])
+st.caption(trans.get("footer", "LungGuard HK v4.3 • Research Prototype Only"))
