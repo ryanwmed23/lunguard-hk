@@ -1,0 +1,13 @@
+{
+  "training_date": "2026-03-29T17:13:38.785347",
+  "num_samples": 200,
+  "reported_auc": 0.95,
+  "training_type": "from_scratch",
+  "cv_used": true,
+  "cv_folds": 5,
+  "calibration": "isotonic",
+  "conformal_method": "score",
+  "git_commit_hash": "9b04666",
+  "raw_model_filename": "e_nose_xgboost_model_20260329_1713_AUC0.950.pkl",
+  "calibrated_model_filename": "e_nose_calibrated_model_20260329_1713_AUC0.950.pkl"
+}

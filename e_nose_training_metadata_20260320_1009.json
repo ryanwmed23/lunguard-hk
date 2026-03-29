@@ -1,0 +1,10 @@
+{
+  "training_date": "2026-03-20T10:09:20.388093",
+  "num_samples": 200,
+  "reported_auc": 0.999,
+  "training_type": "from_scratch",
+  "cv_used": true,
+  "cv_folds": 5,
+  "git_commit_hash": "9b04666",
+  "model_filename": "e_nose_xgboost_model_20260320_1009_AUC0.999.pkl"
+}
